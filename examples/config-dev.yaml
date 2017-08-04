@@ -83,3 +83,11 @@ staticPasswords:
   hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
   username: "admin"
   userID: "08a8684b-db88-4b73-90a9-3cd1661f5466"
+  # Must match an existing group
+  groupnames:
+  - "group-1"
+
+# A static list of groups that a user can be a part of. By identifying here, dex
+# won't look in its underlying storage for passwords.
+staticGroups:
+- groupname: "group-1"

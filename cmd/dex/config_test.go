@@ -50,11 +50,14 @@ staticPasswords:
   hash: "$2a$10$33EMT0cVYVlPy6WAMCLsceLYjWhuHpbz5yuZxu/GAFj03J9Lytjuy"
   username: "admin"
   userID: "08a8684b-db88-4b73-90a9-3cd1661f5466"
-- email: "foo@example.com"  
+- email: "foo@example.com"
   # base64'd value of the same bcrypt hash above. We want to be able to parse both of these
   hash: "JDJhJDEwJDMzRU1UMGNWWVZsUHk2V0FNQ0xzY2VMWWpXaHVIcGJ6NXl1Wnh1L0dBRmowM0o5THl0anV5"
   username: "foo"
   userID: "41331323-6f44-45e6-b3b9-2c4b60c02be5"
+staticGroups:
+- groupname: "example-group-1"
+- groupname: "example-group-2"
 
 expiry:
   signingKeys: "6h"
@@ -119,6 +122,10 @@ logger:
 				Username: "foo",
 				UserID:   "41331323-6f44-45e6-b3b9-2c4b60c02be5",
 			},
+		},
+		StaticGroups: []group{
+			{Groupname: "example-group-1"},
+			{Groupname: "example-group-2"},
 		},
 		Expiry: Expiry{
 			SigningKeys: "6h",

@@ -17,6 +17,10 @@ var (
 
 	// ErrAlreadyExists is the error returned by storages if a resource ID is taken during a create.
 	ErrAlreadyExists = errors.New("ID already exists")
+
+	// ErrGroupNotFound is the error returned by storage if a password is being
+	// created with a non-existent group
+	ErrGroupNotFound = errors.New("group not found")
 )
 
 // Kubernetes only allows lower case letters for names.
@@ -52,6 +56,7 @@ type Storage interface {
 	CreateAuthCode(c AuthCode) error
 	CreateRefresh(r RefreshToken) error
 	CreatePassword(p Password) error
+	// CreateGroup(g Group) error
 	CreateOfflineSessions(s OfflineSessions) error
 	CreateConnector(c Connector) error
 
@@ -63,12 +68,14 @@ type Storage interface {
 	GetKeys() (Keys, error)
 	GetRefresh(id string) (RefreshToken, error)
 	GetPassword(email string) (Password, error)
+	// GetGroup(name string) (Group, error)
 	GetOfflineSessions(userID string, connID string) (OfflineSessions, error)
 	GetConnector(id string) (Connector, error)
 
 	ListClients() ([]Client, error)
 	ListRefreshTokens() ([]RefreshToken, error)
 	ListPasswords() ([]Password, error)
+	// ListGroups() ([]Group, error)
 	ListConnectors() ([]Connector, error)
 
 	// Delete methods MUST be atomic.
@@ -77,6 +84,7 @@ type Storage interface {
 	DeleteClient(id string) error
 	DeleteRefresh(id string) error
 	DeletePassword(email string) error
+	// DeleteGroup(name string) error
 	DeleteOfflineSessions(userID string, connID string) error
 	DeleteConnector(id string) error
 
@@ -99,6 +107,7 @@ type Storage interface {
 	UpdateAuthRequest(id string, updater func(a AuthRequest) (AuthRequest, error)) error
 	UpdateRefreshToken(id string, updater func(r RefreshToken) (RefreshToken, error)) error
 	UpdatePassword(email string, updater func(p Password) (Password, error)) error
+	// UpdateGroup(name string, updater func(g Group) (Group, error)) error
 	UpdateOfflineSessions(userID string, connID string, updater func(s OfflineSessions) (OfflineSessions, error)) error
 	UpdateConnector(id string, updater func(c Connector) (Connector, error)) error
 
@@ -293,6 +302,14 @@ type Password struct {
 
 	// Randomly generated user ID. This is NOT the primary ID of the Password object.
 	UserID string `json:"userID"`
+
+	// Groups that user belongs to. Optional.
+	Groupnames []string `json:"groupnames,omitempty"`
+}
+
+// Group is a group of users
+type Group struct {
+	Groupname string `json:"groupname"`
 }
 
 // Connector is an object that contains the metadata about connectors used to login to Dex.

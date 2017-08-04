@@ -75,6 +75,7 @@ func serve(cmd *cobra.Command, args []string) error {
 	}{
 		{c.Issuer == "", "no issuer specified in config file"},
 		{!c.EnablePasswordDB && len(c.StaticPasswords) != 0, "cannot specify static passwords without enabling password db"},
+		{!c.EnablePasswordDB && len(c.StaticGroups) != 0, "cannot specify static groups without enabling password db"},
 		{c.Storage.Config == nil, "no storage suppied in config file"},
 		{c.Web.HTTP == "" && c.Web.HTTPS == "", "must supply a HTTP/HTTPS  address to listen on"},
 		{c.Web.HTTPS != "" && c.Web.TLSCert == "", "no cert specified for HTTPS"},
@@ -146,6 +147,13 @@ func serve(cmd *cobra.Command, args []string) error {
 		}
 		s = storage.WithStaticPasswords(s, passwords)
 	}
+	if len(c.StaticGroups) > 0 {
+		groups := make([]storage.Group, len(c.StaticGroups))
+		for i, p := range c.StaticGroups {
+			groups[i] = storage.Group(p)
+		}
+		s = storage.WithStaticGroups(s, groups)
+	}
 
 	storageConnectors := make([]storage.Connector, len(c.StaticConnectors))
 	for i, c := range c.StaticConnectors {
@@ -172,7 +180,7 @@ func serve(cmd *cobra.Command, args []string) error {
 			Name: "Email",
 			Type: server.LocalConnector,
 		})
-		logger.Infof("config connector: local passwords enabled")
+		logger.Infof("config connector: local passwords and groups enabled")
 	}
 
 	s = storage.WithStaticConnectors(s, storageConnectors)

@@ -151,6 +151,83 @@ func (s staticPasswordsStorage) UpdatePassword(email string, updater func(old Pa
 	return s.Storage.UpdatePassword(email, updater)
 }
 
+type staticGroupsStorage struct {
+	Storage
+
+	// A read-only set of groups.
+	groups       []Group
+	groupsByName map[string]Group
+}
+
+// WithStaticGroups returns a storage with a read-only set of groups. Write actions,
+// such as creating other groups, will fail.
+func WithStaticGroups(s Storage, staticGroups []Group) Storage {
+	groupsByName := make(map[string]Group, len(staticGroups))
+	for _, g := range staticGroups {
+		g.Groupname = strings.ToLower(g.Groupname)
+		groupsByName[g.Groupname] = g
+	}
+	return staticGroupsStorage{s, staticGroups, groupsByName}
+}
+
+// func (s staticGroupsStorage) isStatic(name string) bool {
+// 	_, ok := s.groupsByName[strings.ToLower(name)]
+// 	return ok
+// }
+
+func (s staticGroupsStorage) GetGroup(name string) (Group, error) {
+	// TODO(ericchiang): BLAH. We really need to figure out how to handle
+	// lower cased emails better.
+	if group, ok := s.groupsByName[strings.ToLower(name)]; ok {
+		return group, nil
+	}
+	// return s.Storage.GetGroup(name)
+	return Group{}, nil
+}
+
+func (s staticGroupsStorage) ListGroups() ([]Group, error) {
+	// groups, err := s.Storage.ListGroups()
+	// if err != nil {
+	// 	return nil, err
+	// }
+	//
+	// n := 0
+	// for _, group := range groups {
+	// 	// If an entry has the same email as those provided in the static
+	// 	// values, prefer the static value.
+	// 	if !s.isStatic(group.Groupname) {
+	// 		groups[n] = group
+	// 		n++
+	// 	}
+	// }
+	// return append(groups[:n], s.groups...), nil
+	return s.groups, nil
+}
+
+func (s staticGroupsStorage) CreateGroup(p Group) error {
+	// if s.isStatic(p.Groupname) {
+	// 	return errors.New("static groups: read-only cannot create group")
+	// }
+	// return s.Storage.CreateGroup(p)
+	return errors.New("static groups: read-only cannot create group")
+}
+
+func (s staticGroupsStorage) DeleteGroup(name string) error {
+	// if s.isStatic(name) {
+	// 	return errors.New("static groups: read-only cannot delete group")
+	// }
+	// return s.Storage.DeleteGroup(name)
+	return errors.New("static groups: read-only cannot delete group")
+}
+
+func (s staticGroupsStorage) UpdateGroup(name string, updater func(old Group) (Group, error)) error {
+	// if s.isStatic(name) {
+	// 	return errors.New("static groups: read-only cannot update group")
+	// }
+	// return s.Storage.UpdateGroup(name, updater)
+	return errors.New("static groups: read-only cannot update group")
+}
+
 // staticConnectorsStorage represents a storage with read-only set of connectors.
 type staticConnectorsStorage struct {
 	Storage

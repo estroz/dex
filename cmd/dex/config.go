@@ -44,24 +44,29 @@ type Config struct {
 	// querying the storage. Cannot be specified without enabling a passwords
 	// database.
 	StaticPasswords []password `json:"staticPasswords"`
+
+	// StaticGroups takes a list of group strings
+	StaticGroups []group `json:"staticGroups"`
 }
 
 type password storage.Password
 
 func (p *password) UnmarshalJSON(b []byte) error {
 	var data struct {
-		Email    string `json:"email"`
-		Username string `json:"username"`
-		UserID   string `json:"userID"`
-		Hash     string `json:"hash"`
+		Email      string   `json:"email"`
+		Username   string   `json:"username"`
+		UserID     string   `json:"userID"`
+		Hash       string   `json:"hash"`
+		Groupnames []string `json:"groupnames,omitempty"`
 	}
 	if err := json.Unmarshal(b, &data); err != nil {
 		return err
 	}
 	*p = password(storage.Password{
-		Email:    data.Email,
-		Username: data.Username,
-		UserID:   data.UserID,
+		Email:      data.Email,
+		Username:   data.Username,
+		UserID:     data.UserID,
+		Groupnames: data.Groupnames,
 	})
 	if len(data.Hash) == 0 {
 		return fmt.Errorf("no password hash provided")
@@ -83,6 +88,24 @@ func (p *password) UnmarshalJSON(b []byte) error {
 		return fmt.Errorf("malformed bcrypt hash: %v", err)
 	}
 	p.Hash = hashBytes
+	return nil
+}
+
+type group storage.Group
+
+func (g *group) UnmarshalJSON(b []byte) error {
+	var data struct {
+		Groupname string `json:"groupname"`
+	}
+	if err := json.Unmarshal(b, &data); err != nil {
+		return err
+	}
+	*g = group(storage.Group{
+		Groupname: data.Groupname,
+	})
+	if data.Groupname == "" {
+		return fmt.Errorf("no group name provided")
+	}
 	return nil
 }
 
