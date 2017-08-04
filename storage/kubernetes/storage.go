@@ -77,6 +77,18 @@ func (c *Config) open(logger logrus.FieldLogger, errOnTPRs bool) (*client, error
 		return nil, err
 	}
 
+	// According to https://github.com/golang/go/issues/19297, go 1.8.X url.Parse
+	// can only parse 'IP:PORT' URL's if prepended with a protocol identifier,
+	// ex. 'https://'. Ensure that the 'server' URL parsed from the config file is
+	// prefixed with "http(s)://".
+	if !strings.HasPrefix(cluster.Server, "http") {
+		if !cluster.InsecureSkipTLSVerify && (cluster.CertificateAuthority != "" || cluster.CertificateAuthorityData != "") {
+			cluster.Server = "https://" + cluster.Server
+		} else {
+			cluster.Server = "http://" + cluster.Server
+		}
+	}
+
 	cli, err := newClient(cluster, user, namespace, logger)
 	if err != nil {
 		return nil, fmt.Errorf("create client: %v", err)
@@ -139,7 +151,7 @@ func (cli *client) createThirdPartyResources() (ok bool) {
 			}
 			continue
 		}
-		cli.logger.Errorf("create third party resource %s", r.ObjectMeta.Name)
+		cli.logger.Debugf("create third party resource %s", r.ObjectMeta.Name)
 	}
 	return ok
 }
