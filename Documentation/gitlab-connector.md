@@ -20,10 +20,17 @@ connectors:
     # Required field for connector name.
     name: GitLab
     config:
-      # optional, default = https://www.gitlab.com 
+      # optional, default = https://www.gitlab.com
       baseURL: https://www.gitlab.com
       # Credentials can be string literals or pulled from the environment.  
-      clientID: $GITLAB_APPLICATION_ID 
+      clientID: $GITLAB_APPLICATION_ID
       clientSecret: $GITLAB_CLIENT_SECRET
       redirectURI: http://127.0.0.1:5556/dex/callback
+      # Optional group, communicate through the "groups" scope. NOTE: a GitLab
+      # connector group corresponds to a GitLab-specific service object and not
+      # a "groups" scope, although a GitLab connector group is used to retrieve
+      # a "groups" scope.
+      #
+      # NOTE: This is an EXPERIMENTAL config option and will likely change.
+      group: my-group
 ```

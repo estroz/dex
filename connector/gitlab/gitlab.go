@@ -21,27 +21,13 @@ const (
 	scopeOrgs  = "read:org"
 )
 
-// Config holds configuration options for gilab logins.
+// Config holds configuration options for GitLab logins.
 type Config struct {
 	BaseURL      string `json:"baseURL"`
 	ClientID     string `json:"clientID"`
 	ClientSecret string `json:"clientSecret"`
 	RedirectURI  string `json:"redirectURI"`
-}
-
-type gitlabUser struct {
-	ID       int
-	Name     string
-	Username string
-	State    string
-	Email    string
-	IsAdmin  bool
-}
-
-type gitlabGroup struct {
-	ID   int
-	Name string
-	Path string
+	Group        string `json:"group,omitempty"`
 }
 
 // Open returns a strategy for logging in through GitLab.
@@ -52,6 +38,7 @@ func (c *Config) Open(logger logrus.FieldLogger) (connector.Connector, error) {
 	return &gitlabConnector{
 		baseURL:      c.BaseURL,
 		redirectURI:  c.RedirectURI,
+		group:        c.Group,
 		clientID:     c.ClientID,
 		clientSecret: c.ClientSecret,
 		logger:       logger,
@@ -71,7 +58,7 @@ var (
 type gitlabConnector struct {
 	baseURL      string
 	redirectURI  string
-	org          string
+	group        string
 	clientID     string
 	clientSecret string
 	logger       logrus.FieldLogger
@@ -140,12 +127,11 @@ func (c *gitlabConnector) HandleCallback(s connector.Scopes, r *http.Request) (i
 		EmailVerified: true,
 	}
 
-	if s.Groups {
-		groups, err := c.groups(ctx, client)
-		if err != nil {
+	if s.Groups && c.group != "" {
+		if err := c.userInGroup(ctx, client, c.group); err != nil {
 			return identity, fmt.Errorf("gitlab: get groups: %v", err)
 		}
-		identity.Groups = groups
+		identity.Groups = []string{c.group}
 	}
 
 	if s.OfflineAccess {
@@ -183,22 +169,32 @@ func (c *gitlabConnector) Refresh(ctx context.Context, s connector.Scopes, ident
 	ident.Username = username
 	ident.Email = user.Email
 
-	if s.Groups {
-		groups, err := c.groups(ctx, client)
-		if err != nil {
+	if s.Groups && c.group != "" {
+		if err := c.userInGroup(ctx, client, c.group); err != nil {
 			return ident, fmt.Errorf("gitlab: get groups: %v", err)
 		}
-		ident.Groups = groups
+		ident.Groups = []string{c.group}
 	}
 	return ident, nil
 }
 
-// user queries the GitLab API for profile information using the provided client. The HTTP
-// client is expected to be constructed by the golang.org/x/oauth2 package, which inserts
-// a bearer token as part of the request.
-func (c *gitlabConnector) user(ctx context.Context, client *http.Client) (gitlabUser, error) {
-	var u gitlabUser
-	req, err := http.NewRequest("GET", c.baseURL+"/api/v3/user", nil)
+// user holds a GitLab users' information as defined by
+// https://docs.gitlab.com/ce/api/users.html#user
+type user struct {
+	ID       int    `json:"id"`
+	Username string `json:"username"`
+	Name     string `json:"name"`
+	Email    string `json:"email"`
+}
+
+// user queries the GitLab API for profile information using the provided client.
+//
+// The HTTP client is expected to be constructed by the golang.org/x/oauth2
+// package, which inserts a bearer token as part of the request.
+func (c *gitlabConnector) user(ctx context.Context, client *http.Client) (user, error) {
+	// https://docs.gitlab.com/ce/api/users.html#for-normal-users
+	var u user
+	req, err := http.NewRequest("GET", c.baseURL+"/api/v4/user", nil)
 	if err != nil {
 		return u, fmt.Errorf("gitlab: new req: %v", err)
 	}
@@ -223,52 +219,61 @@ func (c *gitlabConnector) user(ctx context.Context, client *http.Client) (gitlab
 	return u, nil
 }
 
-// groups queries the GitLab API for group membership.
+// group holds a GitLab groups' information as defined by
+// https://docs.gitlab.com/ce/api/groups.html#group
+type group struct {
+	ID   int
+	Name string
+	Path string
+}
+
+// userInGroup queries the GitLab API for a users' group membership.
 //
 // The HTTP passed client is expected to be constructed by the golang.org/x/oauth2 package,
 // which inserts a bearer token as part of the request.
-func (c *gitlabConnector) groups(ctx context.Context, client *http.Client) ([]string, error) {
+func (c *gitlabConnector) userInGroup(ctx context.Context, client *http.Client, groupName string) error {
 
-	apiURL := c.baseURL + "/api/v3/groups"
+	// https://docs.gitlab.com/ee/api/README.html#pagination-link-header
+	reNext := regexp.MustCompile("<([^>]+)>; rel=\"next\"")
+	reLast := regexp.MustCompile("<([^>]+)>; rel=\"last\"")
+	// https://docs.gitlab.com/ce/api/groups.html#list-groups
+	apiURL := c.baseURL + "/api/v4/groups"
 
-	reNext := regexp.MustCompile("<(.*)>; rel=\"next\"")
-	reLast := regexp.MustCompile("<(.*)>; rel=\"last\"")
-
-	groups := []string{}
-	var gitlabGroups []gitlabGroup
+	var gitlabGroups []group
 	for {
-		// 100 is the maximum number for per_page that allowed by gitlab
+		// 100 is the maximum per_page allowed by GitLab
 		req, err := http.NewRequest("GET", apiURL, nil)
 		if err != nil {
-			return nil, fmt.Errorf("gitlab: new req: %v", err)
+			return fmt.Errorf("gitlab: new req: %v", err)
 		}
 		req = req.WithContext(ctx)
 		resp, err := client.Do(req)
 		if err != nil {
-			return nil, fmt.Errorf("gitlab: get groups: %v", err)
+			return fmt.Errorf("gitlab: get groups: %v", err)
 		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
 			body, err := ioutil.ReadAll(resp.Body)
 			if err != nil {
-				return nil, fmt.Errorf("gitlab: read body: %v", err)
+				return fmt.Errorf("gitlab: read body: %v", err)
 			}
-			return nil, fmt.Errorf("%s: %s", resp.Status, body)
+			return fmt.Errorf("%s: %s", resp.Status, body)
 		}
 
 		if err := json.NewDecoder(resp.Body).Decode(&gitlabGroups); err != nil {
-			return nil, fmt.Errorf("gitlab: unmarshal groups: %v", err)
+			return fmt.Errorf("gitlab: unmarshal groups: %v", err)
 		}
 
 		for _, group := range gitlabGroups {
-			groups = append(groups, group.Name)
+			if group.Name == groupName {
+				return nil
+			}
 		}
 
-		link := resp.Header.Get("Link")
-
-		if len(reLast.FindStringSubmatch(link)) > 1 {
-			lastPageURL := reLast.FindStringSubmatch(link)[1]
+		links := resp.Header.Get("Link")
+		if len(reLast.FindStringSubmatch(links)) > 1 {
+			lastPageURL := reLast.FindStringSubmatch(links)[1]
 
 			if apiURL == lastPageURL {
 				break
@@ -277,12 +282,12 @@ func (c *gitlabConnector) groups(ctx context.Context, client *http.Client) ([]st
 			break
 		}
 
-		if len(reNext.FindStringSubmatch(link)) > 1 {
-			apiURL = reNext.FindStringSubmatch(link)[1]
+		if len(reNext.FindStringSubmatch(links)) > 1 {
+			apiURL = reNext.FindStringSubmatch(links)[1]
 		} else {
 			break
 		}
-
 	}
-	return groups, nil
+
+	return fmt.Errorf("gitlab: user not a member of group %q", c.group)
 }
