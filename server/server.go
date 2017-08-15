@@ -60,6 +60,9 @@ type Config struct {
 	// Logging in implies approval.
 	SkipApprovalScreen bool
 
+	// Password connector to use for resource owner password credential grant requests
+	PasswordConnectorID string
+
 	RotateKeysAfter  time.Duration // Defaults to 6 hours.
 	IDTokensValidFor time.Duration // Defaults to 24 hours
 
@@ -125,6 +128,9 @@ type Server struct {
 
 	supportedResponseTypes map[string]bool
 
+	// Should also be present in connectors
+	passwordConnectorID string
+
 	now func() time.Time
 
 	idTokensValidFor time.Duration
@@ -186,6 +192,7 @@ func newServer(ctx context.Context, c Config, rotationStrategy rotationStrategy)
 		connectors:             make(map[string]Connector),
 		storage:                newKeyCacher(c.Storage, now),
 		supportedResponseTypes: supported,
+		passwordConnectorID:    c.PasswordConnectorID,
 		idTokensValidFor:       value(c.IDTokensValidFor, 24*time.Hour),
 		skipApproval:           c.SkipApprovalScreen,
 		now:                    now,
@@ -473,4 +480,28 @@ func (s *Server) getConnector(id string) (Connector, error) {
 	}
 
 	return conn, nil
+}
+
+func (s *Server) isConnRefresh(w http.ResponseWriter, connID string, scopes []string) bool {
+	// Ensure the connector supports refresh tokens.
+	//
+	// Connectors like `saml` do not implement RefreshConnector.
+	conn, err := s.getConnector(connID)
+	if err != nil {
+		s.logger.Errorf("connector with ID %q not found: %v", connID, err)
+		s.tokenErrHelper(w, errServerError, "", http.StatusInternalServerError)
+		return false
+	}
+
+	_, ok := conn.Connector.(connector.RefreshConnector)
+	if !ok {
+		return false
+	}
+
+	for _, scope := range scopes {
+		if scope == scopeOfflineAccess {
+			return true
+		}
+	}
+	return false
 }

@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/crypto/bcrypt"
+
 	"github.com/gorilla/mux"
 	jose "gopkg.in/square/go-jose.v2"
 
@@ -189,7 +191,7 @@ func (s *Server) handleAuthorization(w http.ResponseWriter, r *http.Request) {
 		connectorInfos[i] = connectorInfo{
 			ID:   conn.ID,
 			Name: conn.Name,
-			// TODO(ericchiang): Make this pass on r.URL.RawQuery and let something latter
+			// TODO(ericchiang): Make this pass on r.URL.RawQuery and let something later
 			// on create the auth request.
 			URL: s.absPath("/auth", conn.ID) + "?req=" + authReq.ID,
 		}
@@ -624,6 +626,8 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		s.handleAuthCode(w, r, client)
 	case grantTypeRefreshToken:
 		s.handleRefreshToken(w, r, client)
+	case grantTypePasswordCredentials:
+		s.handlePasswordCredentials(w, r, client)
 	default:
 		s.tokenErrHelper(w, errInvalidGrant, "", http.StatusBadRequest)
 	}
@@ -664,31 +668,8 @@ func (s *Server) handleAuthCode(w http.ResponseWriter, r *http.Request, client s
 		return
 	}
 
-	reqRefresh := func() bool {
-		// Ensure the connector supports refresh tokens.
-		//
-		// Connectors like `saml` do not implement RefreshConnector.
-		conn, err := s.getConnector(authCode.ConnectorID)
-		if err != nil {
-			s.logger.Errorf("connector with ID %q not found: %v", authCode.ConnectorID, err)
-			s.tokenErrHelper(w, errServerError, "", http.StatusInternalServerError)
-			return false
-		}
-
-		_, ok := conn.Connector.(connector.RefreshConnector)
-		if !ok {
-			return false
-		}
-
-		for _, scope := range authCode.Scopes {
-			if scope == scopeOfflineAccess {
-				return true
-			}
-		}
-		return false
-	}()
 	var refreshToken string
-	if reqRefresh {
+	if s.isConnRefresh(w, authCode.ConnectorID, authCode.Scopes) {
 		refresh := storage.RefreshToken{
 			ID:            storage.NewID(),
 			Token:         storage.NewID(),
@@ -701,90 +682,7 @@ func (s *Server) handleAuthCode(w http.ResponseWriter, r *http.Request, client s
 			CreatedAt:     s.now(),
 			LastUsed:      s.now(),
 		}
-		token := &internal.RefreshToken{
-			RefreshId: refresh.ID,
-			Token:     refresh.Token,
-		}
-		if refreshToken, err = internal.Marshal(token); err != nil {
-			s.logger.Errorf("failed to marshal refresh token: %v", err)
-			s.tokenErrHelper(w, errServerError, "", http.StatusInternalServerError)
-			return
-		}
-
-		if err := s.storage.CreateRefresh(refresh); err != nil {
-			s.logger.Errorf("failed to create refresh token: %v", err)
-			s.tokenErrHelper(w, errServerError, "", http.StatusInternalServerError)
-			return
-		}
-
-		// deleteToken determines if we need to delete the newly created refresh token
-		// due to a failure in updating/creating the OfflineSession object for the
-		// corresponding user.
-		var deleteToken bool
-		defer func() {
-			if deleteToken {
-				// Delete newly created refresh token from storage.
-				if err := s.storage.DeleteRefresh(refresh.ID); err != nil {
-					s.logger.Errorf("failed to delete refresh token: %v", err)
-					s.tokenErrHelper(w, errServerError, "", http.StatusInternalServerError)
-					return
-				}
-			}
-		}()
-
-		tokenRef := storage.RefreshTokenRef{
-			ID:        refresh.ID,
-			ClientID:  refresh.ClientID,
-			CreatedAt: refresh.CreatedAt,
-			LastUsed:  refresh.LastUsed,
-		}
-
-		// Try to retrieve an existing OfflineSession object for the corresponding user.
-		if session, err := s.storage.GetOfflineSessions(refresh.Claims.UserID, refresh.ConnectorID); err != nil {
-			if err != storage.ErrNotFound {
-				s.logger.Errorf("failed to get offline session: %v", err)
-				s.tokenErrHelper(w, errServerError, "", http.StatusInternalServerError)
-				deleteToken = true
-				return
-			}
-			offlineSessions := storage.OfflineSessions{
-				UserID:  refresh.Claims.UserID,
-				ConnID:  refresh.ConnectorID,
-				Refresh: make(map[string]*storage.RefreshTokenRef),
-			}
-			offlineSessions.Refresh[tokenRef.ClientID] = &tokenRef
-
-			// Create a new OfflineSession object for the user and add a reference object for
-			// the newly received refreshtoken.
-			if err := s.storage.CreateOfflineSessions(offlineSessions); err != nil {
-				s.logger.Errorf("failed to create offline session: %v", err)
-				s.tokenErrHelper(w, errServerError, "", http.StatusInternalServerError)
-				deleteToken = true
-				return
-			}
-		} else {
-			if oldTokenRef, ok := session.Refresh[tokenRef.ClientID]; ok {
-				// Delete old refresh token from storage.
-				if err := s.storage.DeleteRefresh(oldTokenRef.ID); err != nil {
-					s.logger.Errorf("failed to delete refresh token: %v", err)
-					s.tokenErrHelper(w, errServerError, "", http.StatusInternalServerError)
-					deleteToken = true
-					return
-				}
-			}
-
-			// Update existing OfflineSession obj with new RefreshTokenRef.
-			if err := s.storage.UpdateOfflineSessions(session.UserID, session.ConnID, func(old storage.OfflineSessions) (storage.OfflineSessions, error) {
-				old.Refresh[tokenRef.ClientID] = &tokenRef
-				return old, nil
-			}); err != nil {
-				s.logger.Errorf("failed to update offline session: %v", err)
-				s.tokenErrHelper(w, errServerError, "", http.StatusInternalServerError)
-				deleteToken = true
-				return
-			}
-
-		}
+		refreshToken = s.refreshTokenHelper(w, refresh)
 	}
 	s.writeAccessToken(w, idToken, accessToken, refreshToken, expiry)
 }
@@ -960,6 +858,166 @@ func (s *Server) handleRefreshToken(w http.ResponseWriter, r *http.Request, clie
 	s.writeAccessToken(w, idToken, accessToken, rawNewToken, expiry)
 }
 
+// handle an access token request for resource owner password credentials grants
+//
+// https://tools.ietf.org/html/rfc6749#section-4.3.3
+// TODO(estroz): rate limit on this endpoint
+// NOTE(estroz): TLS is required
+func (s *Server) handlePasswordCredentials(w http.ResponseWriter, r *http.Request, client storage.Client) {
+	username, password := r.PostFormValue("username"), r.PostFormValue("password")
+	if username == "" || password == "" {
+		s.logger.Errorln("Username or password were empty")
+		s.renderError(w, http.StatusBadRequest, "Username and/or password were empty.")
+		return
+	}
+
+	// Validate username and password
+	//
+	// https://tools.ietf.org/html/rfc6749#section-4.3.2
+	// TODO(estroz): will username always be an email?
+	storedPassword, err := s.storage.GetPassword(username)
+	if err != nil {
+		s.logger.Errorf("Error retrieving password of user %q from storage: %v", username, err)
+		s.renderError(w, http.StatusNotFound, "Username and/or password entered are incorrect.")
+		return
+	}
+	if err := bcrypt.CompareHashAndPassword(storedPassword.Hash, []byte(password)); err != nil {
+		s.logger.Errorf("Password entered by user %q is incorrect: %v", username, err)
+		s.renderError(w, http.StatusNotFound, "Username and/or password entered are incorrect.")
+		return
+	}
+
+	// Create a new access_token, simple claims, and generate an id_token.
+	accessToken := storage.NewID()
+	claims := storage.Claims{
+		UserID:   storage.NewID(),
+		Username: username,
+	}
+	scopes := strings.Fields(r.PostFormValue("scope"))
+	// No nonce is needed because no authorization request was made.
+	idToken, expiry, err := s.newIDToken(client.ID, claims, scopes, "", accessToken, s.passwordConnectorID)
+	if err != nil {
+		s.logger.Errorf("failed to create ID token: %v", err)
+		s.tokenErrHelper(w, errServerError, "", http.StatusInternalServerError)
+		return
+	}
+
+	conn, err := s.storage.GetConnector(s.passwordConnectorID)
+	if err != nil {
+		s.logger.Errorf("failed get storage connector: %v", err)
+		s.tokenErrHelper(w, errServerError, "", http.StatusInternalServerError)
+		return
+	}
+
+	// Create refresh token/ref and insert into storage
+	var refreshToken string
+	if s.isConnRefresh(w, s.passwordConnectorID, scopes) {
+		refresh := storage.RefreshToken{
+			ID:            storage.NewID(),
+			Token:         storage.NewID(),
+			ClientID:      client.ID,
+			ConnectorID:   s.passwordConnectorID,
+			Scopes:        scopes,
+			Claims:        claims,
+			ConnectorData: conn.Config,
+			CreatedAt:     s.now(),
+			LastUsed:      s.now(),
+		}
+		refreshToken = s.refreshTokenHelper(w, refresh)
+	}
+	s.writeAccessToken(w, idToken, accessToken, refreshToken, expiry)
+}
+
+// refreshTokenHelper creates a refresh token in storage, a token reference
+// to create or update an offline session, and returns the refresh token string.
+func (s *Server) refreshTokenHelper(w http.ResponseWriter, refresh storage.RefreshToken) string {
+	token := &internal.RefreshToken{
+		RefreshId: refresh.ID,
+		Token:     refresh.Token,
+	}
+	refreshToken, err := internal.Marshal(token)
+	if err != nil {
+		s.logger.Errorf("failed to marshal refresh token: %v", err)
+		s.tokenErrHelper(w, errServerError, "", http.StatusInternalServerError)
+		return ""
+	}
+
+	if err := s.storage.CreateRefresh(refresh); err != nil {
+		s.logger.Errorf("failed to create refresh token: %v", err)
+		s.tokenErrHelper(w, errServerError, "", http.StatusInternalServerError)
+		return ""
+	}
+
+	// deleteToken determines if we need to delete the newly created refresh token
+	// due to a failure in updating/creating the OfflineSession object for the
+	// corresponding user.
+	var deleteToken bool
+	defer func() {
+		if deleteToken {
+			// Delete newly created refresh token from storage.
+			if err := s.storage.DeleteRefresh(refresh.ID); err != nil {
+				s.logger.Errorf("failed to delete refresh token: %v", err)
+				s.tokenErrHelper(w, errServerError, "", http.StatusInternalServerError)
+				return
+			}
+		}
+	}()
+
+	tokenRef := storage.RefreshTokenRef{
+		ID:        refresh.ID,
+		ClientID:  refresh.ClientID,
+		CreatedAt: refresh.CreatedAt,
+		LastUsed:  refresh.LastUsed,
+	}
+
+	// Try to retrieve an existing OfflineSession object for the corresponding user.
+	if session, err := s.storage.GetOfflineSessions(refresh.Claims.UserID, refresh.ConnectorID); err != nil {
+		if err != storage.ErrNotFound {
+			s.logger.Errorf("failed to get offline session: %v", err)
+			s.tokenErrHelper(w, errServerError, "", http.StatusInternalServerError)
+			deleteToken = true
+			return ""
+		}
+		offlineSessions := storage.OfflineSessions{
+			UserID:  refresh.Claims.UserID,
+			ConnID:  refresh.ConnectorID,
+			Refresh: make(map[string]*storage.RefreshTokenRef),
+		}
+		offlineSessions.Refresh[tokenRef.ClientID] = &tokenRef
+
+		// Create a new OfflineSession object for the user and add a reference object for
+		// the newly received refreshtoken.
+		if err := s.storage.CreateOfflineSessions(offlineSessions); err != nil {
+			s.logger.Errorf("failed to create offline session: %v", err)
+			s.tokenErrHelper(w, errServerError, "", http.StatusInternalServerError)
+			deleteToken = true
+			return ""
+		}
+	} else {
+		if oldTokenRef, ok := session.Refresh[tokenRef.ClientID]; ok {
+			// Delete old refresh token from storage.
+			if err := s.storage.DeleteRefresh(oldTokenRef.ID); err != nil {
+				s.logger.Errorf("failed to delete refresh token: %v", err)
+				s.tokenErrHelper(w, errServerError, "", http.StatusInternalServerError)
+				deleteToken = true
+				return ""
+			}
+		}
+
+		// Update existing OfflineSession obj with new RefreshTokenRef.
+		if err := s.storage.UpdateOfflineSessions(session.UserID, session.ConnID, func(old storage.OfflineSessions) (storage.OfflineSessions, error) {
+			old.Refresh[tokenRef.ClientID] = &tokenRef
+			return old, nil
+		}); err != nil {
+			s.logger.Errorf("failed to update offline session: %v", err)
+			s.tokenErrHelper(w, errServerError, "", http.StatusInternalServerError)
+			deleteToken = true
+			return ""
+		}
+	}
+	return refreshToken
+}
+
 func (s *Server) writeAccessToken(w http.ResponseWriter, idToken, accessToken, refreshToken string, expiry time.Time) {
 	// TODO(ericchiang): figure out an access token story and support the user info
 	// endpoint. For now use a random value so no one depends on the access_token
@@ -983,8 +1041,15 @@ func (s *Server) writeAccessToken(w http.ResponseWriter, idToken, accessToken, r
 		s.tokenErrHelper(w, errServerError, "", http.StatusInternalServerError)
 		return
 	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	// All responses containing tokens MUST have "Cache-Control: no-store" and
+	// "Pragma: no-cache" headers set.
+	//
+	// http://openid.net/specs/openid-connect-core-1_0.html#TokenResponse
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
 	w.Write(data)
 }
 
